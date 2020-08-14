@@ -1,6 +1,6 @@
 # check_dnssec_expiry - Icinga / Nagios Plugin to validate DNSSEC of a DNS-Zone
 
-Goal of this plugin is to enable DNSSEC validation for a given zone, based on a DNSSEC validation resolver.
+Goal of this plugin is to monitor DNSSEC validation for a given zone using a DNSSEC validating resolver.
 
 It covers the following cases:
 
@@ -12,10 +12,11 @@ It covers the following cases:
   - emits a CRITICAL if the remaining percentage is < 10%
   - emits a WARNING if the remaining percentage is < 20%
   - emits an OK if none of the above match
+- If there are multiple RRSIG entries with overlapping validity time-frames, we're fine, if at least one of them fulfills the minimum remaining lifetime check
 - is configurable via command line options, see table below
 
 
-## Installation:
+## Installation (Icinga):
 
 Clone this repository into the directory where you have all your other plugins, for Icinga on Ubuntu, this is probably `/usr/lib/nagios/plugins` but could be somewhere else on your system:
 
@@ -48,16 +49,100 @@ In the above snippet, replace ZONE with the zone to be checked, e.g. "example.or
 **Please adapt the above snippets to your needs!!!** (and refer to the documentation of your monitoring system for further details)
 
 
+## Installation (Icinga2):
+Clone this repository into the directory where you have all your other plugins, for Icinga on Ubuntu, this is probably `/usr/lib/nagios/plugins` but could be somewhere else on your system:
+
+	cd /usr/lib/nagios/plugins
+	git clone https://github.com/mrimann/check_dnssec_expiry.git
+
+To add the command check to your Icinga2 installation, first add the following command definition e.g. to `/etc/icinga2/conf.d/commands.conf`:
+
+	# 'check_dnssec_expiry' command definition
+	object CheckCommand "dnssec_expiry" {
+      import "plugin-check-command"
+      command = [ PluginDir + "/check_dnssec_expiry.sh" ]
+
+      arguments = {
+        "-z" = {
+         required = true
+         value = "$zone$"
+         }
+       "-w" = "$dnssec_warn$"    // Default = 20
+       "-c" = "$dnssec_crit$"    // Default = 10
+       "-r" = "$resolver$"       // Default = 8.8.8.8
+       "-f" = "$failing$"        // Sets the always failing domain (to verify function of resolver). Default = dnssec-failed.org
+      }
+    }
+
+Then add a service definition e.g. to `/etc/icinga2/conf.d/services.conf`:
+
+    apply Service "dnssec" for (zone in host.vars.dnssec_zones) {
+        import "generic-service"
+        vars.zone = zone
+        vars.resolver = "127.0.0.1"
+        display_name = "DNSSEC signature expiring"
+        check_command = "dnssec_expiry"
+        }
+
+And finally, add a list of the zones to be checked to the hosts definition e.g. `/etc/icinga2/conf.d/hosts.conf`:
+
+    /* DNSSEC checks -- https://github.com/mrimann/check_dnssec_expiry */
+    vars.dnssec_zones = ["zone1", "zone2", "zone3" ]
+
+In the above snippet, replace zone1, zone2, zone3 with the zones to be checked.
+You can set vars.resolver to the address of a resolver to use, etc.
+
+**Please adapt the above snippets to your needs!!!** (and refer to the documentation of your monitoring system for further details).
+
+## Installation (Zabbix external check)
+
+The script can also be used as-is as a data source for a Zabbix server external checks.
+
+ * save `check_dnssec_expiry.sh` to `/usr/local/bin`
+ * create wrapper scripts in the directory where Zabbix expects external scripts ( `/usr/lib/zabbix/externalscripts` ), replace `2620:fe::fe` with the IP of the validating resolver of your preference.
+  * `zext_dnssec_sig_percentage.sh`:
+
+  ```bash
+    #!/bin/bash
+    /usr/local/bin/check_dnssec_expiry.sh -z $1 -r 2620:fe::fe | gawk 'match($$0, /sig_lifetime_percentage=([0-9]+)[^0-9]/, b) {print b[1]}'
+  ```
+
+  * `zext_dnssec_sig_seconds.sh`:
+
+  ```bash
+  #!/bin/bash
+  /usr/local/bin/check_dnssec_expiry.sh -z $1 -r 2620:fe::fe | gawk 'match($$0, /sig_lifetime=([0-9]+)\s/, a) {print a[1]}'
+  ```
+
+ * Verify that the scripts are working and returning an integer (percentage or remaining seconds).
+ ```
+ /usr/lib/zabbix/externalscripts/zext_dnssec_sig_percentage.sh switch.ch
+ 98
+ /usr/lib/zabbix/externalscripts/zext_dnssec_sig_seconds.sh switch.ch
+ 2010539
+ ```
+ * In the Zabbix GUI, create a template `DNSSEC signature expiration` and define external check items:
+  * `zext_dnssec_sig_seconds.sh[{HOSTNAME}]` (Numeric unsigned, Units `s`)
+  * `zext_dnssec_sig_percentage.sh[{HOSTNAME}]` (Numeric unsigned)
+
+
+ * Define Triggers/Alerts as usual, for example:
+
+  `{Template DNSSEC signature expiration:zext_dnssec_sig_seconds.sh[{HOSTNAME}].last(#2)}<2d`
+
+  to alert when the remaining signature lifetime falls below 2 days.
 
 ## Command Line Options:
 
 | Option | Triggers what? | Mandatory? | Default value |
 | --- | --- | --- | --- |
+| -h | Renders the help / usage information | no | n/a |
 | -z | Sets the zone to validate, e.g. "example.org" | yes | n/a |
 | -w | Sets the warning percentage value regarding the remainig lifetime of the signature | no | 20 |
 | -c | Sets the critical percentage value regarding the remainig lifetime of the signature | no | 10 |
 | -r | Sets the resolver to use | no | 8.8.8.8 |
 | -f | Sets the always failing domain (used to verify the proper function of the resolving server | no | dnssec-failed.org |
+| -t | Sets the DNS record type to validate, e.g. "A" | no | SOA |
 
 
 ## TODO:
@@ -70,6 +155,16 @@ Well, it needs some serious testing to be honest - please provide feedback on wh
 Feel free to [file new issues](https://github.com/mrimann/check_dnssec_expiry/issues) if you find a problem or to propose a new feature. If you want to contribute your time and submit an improvement, I'm very eager to look at your pull request!
 
 In case you want to discuss a new feature with me, just send me an [e-mail](mailto:mario@rimann.org).
+
+
+### Contributors
+Thanks for your support! (in chronological order)
+- André Keller from [VSHN](www.vshn.ch)
+- Oli Schacher from [Switch CERT](http://www.switch.ch/)
+- Jan-Piet Mens [www.jpmens.net](http://jpmens.net/)
+- Warren Kumari
+- Rob J. Epping
+- Thushjandan Ponnudurai
 
 ## License
 
